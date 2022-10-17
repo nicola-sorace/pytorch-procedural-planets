@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from typing import Tuple
 from enum import IntEnum
+from conf import device, img_size, layers
 
 colormap = cm.turbo
 
@@ -48,7 +49,7 @@ def gen_random_cube_grid(num_cells: int) -> torch.Tensor:
     corner_vals = torch.rand(8, 3) * 2 - 1
     edge_vals = torch.rand(
         12, num_cells - 1, 3
-    ) * 2 -1
+    ) * 2 - 1
     # The rest is unique to each face
     face_vals = torch.rand(6, num_cells - 1, num_cells - 1, 3) * 2 - 1
 
@@ -92,9 +93,9 @@ def theta_phi_to_face_x_y(theta, phi):
     y_abs = torch.abs(y)
     z_abs = torch.abs(z)
 
-    faces = torch.empty(theta.shape, dtype=torch.long)
-    face_xs = torch.empty(theta.shape)
-    face_ys = torch.empty(theta.shape)
+    faces = torch.empty(theta.shape, dtype=torch.long).to(device)
+    face_xs = torch.empty(theta.shape).to(device)
+    face_ys = torch.empty(theta.shape).to(device)
 
     back_faces = (y > 0) & (y > x_abs) & (y > z_abs)
     left_faces = (x < 0) & (-x > z_abs) & (-x > y_abs)
@@ -127,11 +128,53 @@ def theta_phi_to_face_x_y(theta, phi):
     return faces, face_xs, face_ys
 
 
+def face_x_y_to_theta_phi(face_id, fxs, fys):
+    ps = face_x_y_to_x_y_z(
+        torch.IntTensor([face_id]).to(device).repeat(fxs.shape),
+        fxs,
+        fys
+    )
+    xs = ps[:, :, 0]
+    ys = ps[:, :, 1]
+    zs = ps[:, :, 2]
+    theta = torch.arccos(zs / torch.sqrt(xs*xs + ys*ys + zs*zs))
+    phi = torch.arctan2(ys, xs)
+    return theta, phi
+
+
+def split_planet_into_faces(planet, num_cells):
+    img_size = planet.shape
+    fxs = torch.linspace(-1, 1, num_cells).to(device)
+    fys = torch.linspace(-1, 1, num_cells).to(device)
+    fxs, fys = torch.meshgrid(fxs, fys)
+
+    faces = []
+    for f in Face:
+        theta, phi = face_x_y_to_theta_phi(f, fxs, fys)
+        theta = torch.max(
+            torch.LongTensor([0]).to(device),
+            torch.min(
+                torch.LongTensor([img_size[0] - 1]).to(device),
+                (img_size[0] * theta / torch.pi).long()
+            )
+        )
+        phi = torch.max(
+            torch.LongTensor([0]).to(device),
+            torch.min(
+                torch.LongTensor([img_size[1] - 1]).to(device),
+                (img_size[1] * phi / (2 * torch.pi)).long()
+            )
+        )
+        faces.append(planet[theta, phi])
+
+    return torch.stack(faces)
+
+
 def face_x_y_to_x_y_z(faces, fxs, fys):
-    fzs = torch.ones(fxs.shape)
-    xs = torch.empty(fxs.shape)
-    ys = torch.empty(fxs.shape)
-    zs = torch.empty(fxs.shape)
+    fzs = torch.ones(fxs.shape).to(device).to(device)
+    xs = torch.empty(fxs.shape).to(device).to(device)
+    ys = torch.empty(fxs.shape).to(device).to(device)
+    zs = torch.empty(fxs.shape).to(device).to(device)
 
     # Normalize
     mag = torch.sqrt(fxs*fxs + fys*fys + fzs*fzs)
@@ -171,14 +214,14 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
     xs = xs * num_cells
     ys = ys * num_cells
     min_x, max_x, frac_x = (
-        torch.max(torch.FloatTensor([0]), torch.floor(xs)).long(),
-        torch.min(torch.FloatTensor([num_cells]), torch.ceil(xs)).long(),
-        smootherstep(torch.fmod(xs, torch.FloatTensor([1])))
+        torch.max(torch.FloatTensor([0]).to(device), torch.floor(xs)).long(),
+        torch.min(torch.FloatTensor([num_cells]).to(device), torch.ceil(xs)).long(),
+        smootherstep(torch.fmod(xs, torch.FloatTensor([1]).to(device)))
     )
     min_y, max_y, frac_y = (
-        torch.max(torch.FloatTensor([0]), torch.floor(ys)).long(),
-        torch.min(torch.FloatTensor([num_cells]), torch.ceil(ys)).long(),
-        smootherstep(torch.fmod(ys, torch.FloatTensor([1])))
+        torch.max(torch.FloatTensor([0]).to(device), torch.floor(ys)).long(),
+        torch.min(torch.FloatTensor([num_cells]).to(device), torch.ceil(ys)).long(),
+        smootherstep(torch.fmod(ys, torch.FloatTensor([1]).to(device)))
     )
     val00, val01, val10, val11 = (
         grid[faces, min_x, min_y],
@@ -208,9 +251,10 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
     return lerp(lerp(val00, val10, frac_x), lerp(val01, val11, frac_x), frac_y)
 
 
-def grid_to_planet(grid: torch.Tensor, num_cells: int, img_size: Tuple[int, int]) -> torch.Tensor:
-    theta = torch.linspace(0, torch.pi, img_size[1])
-    phi = torch.linspace(0, 2*torch.pi, img_size[0])
+def grid_to_planet(grid: torch.Tensor, img_size: Tuple[int, int]) -> torch.Tensor:
+    num_cells = grid.shape[1] - 1
+    theta = torch.linspace(0, torch.pi, img_size[1]).to(device)
+    phi = torch.linspace(0, 2*torch.pi, img_size[0]).to(device)
     theta, phi = torch.meshgrid(theta, phi)
 
     return theta_phi_to_val(grid, num_cells, theta, phi)
@@ -242,13 +286,28 @@ def planet_plot_3d(planet):
     print("Plot generated")
 
 
+def grids_to_planet(grids, img_size):
+    planet = torch.zeros((img_size[1], img_size[0])).to(device)
+    for grid in grids:
+        planet += grid_to_planet(grid, img_size)
+    planet = planet - planet.min()
+    planet = planet / planet.max()
+    return planet
+
+
 if __name__ == '__main__':
-    num_cells = 10
-    # img_size = (128, 64)
-    img_size = (512, 256)
-    # img_size = (1024, 512)
-    grid = gen_random_cube_grid(num_cells)
-    planet = grid_to_planet(grid, num_cells, img_size)
+    grids = [
+        gen_random_cube_grid(num_cells)
+        for num_cells in layers
+    ]
+    planet = grids_to_planet(grids, img_size)
+
     plt.imshow(planet, cmap=colormap)
     plt.show()
     planet_plot_3d(planet)
+
+    faces = split_planet_into_faces(planet, 128)
+    fig, axs = plt.subplots(6, 1)
+    for ax, face in zip(axs, faces):
+        ax.imshow(face, cmap=colormap)
+    fig.show()
