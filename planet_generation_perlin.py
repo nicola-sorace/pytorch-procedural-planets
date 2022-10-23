@@ -6,7 +6,6 @@ ISO spherical coordinates used throughout:
  - azimuthal `phi` in [0, 2pi)
 """
 
-#%% Imports
 import torch
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -35,7 +34,7 @@ def smootherstep(f):
 
 
 def dot(a, b):
-    return a[:, :, 0] * b[:, :, 0] + a[:, :, 1] * b[:, :, 1] + a[:, :, 2] * b[:, :, 2]
+    return a[0, :, :, :] * b[0, :, :] + a[1, :, :, :] * b[1, :, :] + a[2, :, :, :] * b[2, :, :]
 
 
 def gen_random_cube_grid(num_cells: int) -> torch.Tensor:
@@ -81,7 +80,7 @@ def gen_random_cube_grid(num_cells: int) -> torch.Tensor:
     top = concat_face(Face.TOP, 0, 4, 5, 1, 8, 4, 9, 0, flip_top=True)
     bottom = concat_face(Face.BOTTOM, 2, 6, 7, 3, 10, 6, 11, 2, flip_bottom=True)
 
-    return torch.stack((left, front, right, back, top, bottom))
+    return torch.stack((left, front, right, back, top, bottom)).permute(0, 3, 1, 2)
 
 
 def theta_phi_to_face_x_y(theta, phi):
@@ -128,53 +127,59 @@ def theta_phi_to_face_x_y(theta, phi):
     return faces, face_xs, face_ys
 
 
-def face_x_y_to_theta_phi(face_id, fxs, fys):
-    ps = face_x_y_to_x_y_z(
-        torch.IntTensor([face_id]).to(device).repeat(fxs.shape),
-        fxs,
-        fys
-    )
-    xs = ps[:, :, 0]
-    ys = ps[:, :, 1]
-    zs = ps[:, :, 2]
+def face_x_y_to_theta_phi(faces, fxs, fys):
+    ps = face_x_y_to_x_y_z(faces, fxs, fys)
+    xs = ps[0, :, :, :]
+    ys = ps[1, :, :, :]
+    zs = ps[2, :, :, :]
     theta = torch.arccos(zs / torch.sqrt(xs*xs + ys*ys + zs*zs))
-    phi = torch.arctan2(ys, xs)
+    phi = torch.arctan2(ys, xs) + torch.pi
+    # mask = (xs < 0) & (ys >= 0)
+    # phi[mask] = phi[mask] + torch.pi
+    # mask = (xs < 0) & (ys < 0)
+    # phi[mask] = phi[mask] - torch.pi
+    # mask = (xs == 0) & (ys > 0)
+    # phi[mask] = torch.pi / 2
+    # mask = (xs == 0) & (ys < 0)
+    # phi[mask] = -torch.pi / 2
     return theta, phi
 
 
-def split_planet_into_faces(planet, num_cells):
-    img_size = planet.shape
-    fxs = torch.linspace(-1, 1, num_cells).to(device)
-    fys = torch.linspace(-1, 1, num_cells).to(device)
-    fxs, fys = torch.meshgrid(fxs, fys)
+def split_planet_into_faces(planet, num_cells, padding=0):
+    img_size = planet.shape[-2:]
 
-    faces = []
-    for f in Face:
-        theta, phi = face_x_y_to_theta_phi(f, fxs, fys)
-        theta = torch.max(
-            torch.LongTensor([0]).to(device),
-            torch.min(
-                torch.LongTensor([img_size[0] - 1]).to(device),
-                (img_size[0] * theta / torch.pi).long()
-            )
-        )
-        phi = torch.max(
-            torch.LongTensor([0]).to(device),
-            torch.min(
-                torch.LongTensor([img_size[1] - 1]).to(device),
-                (img_size[1] * phi / (2 * torch.pi)).long()
-            )
-        )
-        faces.append(planet[theta, phi])
+    pad_offset = (2 / num_cells) * padding
 
-    return torch.stack(faces)
+    faces = torch.arange(6).float()
+    fxs = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
+    fys = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
+    faces, fxs, fys = torch.meshgrid(faces, fxs, fys)
+    faces = faces.int()
+
+    theta, phi = face_x_y_to_theta_phi(faces, fxs, fys)
+    theta = torch.max(
+        torch.LongTensor([0]).to(device),
+        torch.min(
+            torch.LongTensor([img_size[0] - 1]).to(device),
+            (img_size[0] * theta / torch.pi).long()
+        )
+    )
+    phi = torch.max(
+        torch.LongTensor([0]).to(device),
+        torch.min(
+            torch.LongTensor([img_size[1] - 1]).to(device),
+            (img_size[1] * phi / (2 * torch.pi)).long()
+        )
+    )
+
+    return planet[:, :, theta, phi].permute(0, 2, 1, 3, 4)
 
 
 def face_x_y_to_x_y_z(faces, fxs, fys):
-    fzs = torch.ones(fxs.shape).to(device).to(device)
-    xs = torch.empty(fxs.shape).to(device).to(device)
-    ys = torch.empty(fxs.shape).to(device).to(device)
-    zs = torch.empty(fxs.shape).to(device).to(device)
+    fzs = torch.ones(faces.shape).to(device).to(device)
+    xs = torch.empty(faces.shape).to(device).to(device)
+    ys = torch.empty(faces.shape).to(device).to(device)
+    zs = torch.empty(faces.shape).to(device).to(device)
 
     # Normalize
     mag = torch.sqrt(fxs*fxs + fys*fys + fzs*fzs)
@@ -206,7 +211,7 @@ def face_x_y_to_x_y_z(faces, fxs, fys):
     ys[faces == Face.BOTTOM] = -fys[faces == Face.BOTTOM]
     zs[faces == Face.BOTTOM] = -fzs[faces == Face.BOTTOM]
 
-    return torch.stack((xs, ys, zs)).permute(1, 2, 0)
+    return torch.stack((xs, ys, zs))
 
 
 def theta_phi_to_val(grid, num_cells, theta, phi):
@@ -224,10 +229,10 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
         smootherstep(torch.fmod(ys, torch.FloatTensor([1]).to(device)))
     )
     val00, val01, val10, val11 = (
-        grid[faces, min_x, min_y],
-        grid[faces, min_x, max_y],
-        grid[faces, max_x, min_y],
-        grid[faces, max_x, max_y]
+        grid[:, faces, :, min_x, min_y].permute(3, 2, 0, 1),
+        grid[:, faces, :, min_x, max_y].permute(3, 2, 0, 1),
+        grid[:, faces, :, max_x, min_y].permute(3, 2, 0, 1),
+        grid[:, faces, :, max_x, max_y].permute(3, 2, 0, 1)
     )
     corn00, corn01, corn10, corn11 = (
         face_x_y_to_x_y_z(faces, 2 * min_x.float() / num_cells - 1, 2 * min_y.float() / num_cells - 1),
@@ -240,7 +245,7 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
     py = torch.sin(theta) * torch.sin(phi)
     pz = torch.cos(theta)
 
-    p = torch.stack((px, py, pz)).permute(1, 2, 0)
+    p = torch.stack((px, py, pz))
 
     off00, off01, off10, off11 = (
         p - corn00, p - corn01, p - corn10, p - corn11
@@ -252,7 +257,7 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
 
 
 def grid_to_planet(grid: torch.Tensor, img_size: Tuple[int, int]) -> torch.Tensor:
-    num_cells = grid.shape[1] - 1
+    num_cells = grid.shape[-1] - 1
     theta = torch.linspace(0, torch.pi, img_size[1]).to(device)
     phi = torch.linspace(0, 2*torch.pi, img_size[0]).to(device)
     theta, phi = torch.meshgrid(theta, phi)
@@ -286,27 +291,29 @@ def planet_plot_3d(planet):
     print("Plot generated")
 
 
-def grids_to_planet(grids, img_size):
-    planet = torch.zeros((img_size[1], img_size[0])).to(device)
+def grids_to_planet(grids, batch_size, img_size):
+    planet = torch.zeros((batch_size, img_size[1], img_size[0])).to(device)
     for grid in grids:
-        planet += grid_to_planet(grid, img_size)
+        x = grid_to_planet(grid, img_size)
+        planet += x
     planet = planet - planet.min()
     planet = planet / planet.max()
     return planet
 
 
 if __name__ == '__main__':
+    batch_size = 2
     grids = [
-        gen_random_cube_grid(num_cells)
+        torch.stack([gen_random_cube_grid(num_cells) for _ in range(batch_size)])
         for num_cells in layers
     ]
-    planet = grids_to_planet(grids, img_size)
+    planets = grids_to_planet(grids, batch_size, img_size)
 
-    plt.imshow(planet, cmap=colormap)
+    plt.imshow(planets[0], cmap=colormap)
     plt.show()
-    planet_plot_3d(planet)
+    planet_plot_3d(planets[0])
 
-    faces = split_planet_into_faces(planet, 128)
+    faces = split_planet_into_faces(planets[:, None, :, :], 32)[0, :, 0, :, :]
     fig, axs = plt.subplots(6, 1)
     for ax, face in zip(axs, faces):
         ax.imshow(face, cmap=colormap)

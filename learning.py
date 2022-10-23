@@ -1,7 +1,6 @@
 """
 Neural network which tries to retrieve Perlin gradients from a final planet image
 """
-#%% Imports
 import os
 import torch
 from torch import nn
@@ -53,6 +52,7 @@ print(f"Dataset: {len(train_data)} train, {len(test_data)} test, {len(all_data)}
 class Network(nn.Module):
     def __init__(self):
         super().__init__()
+        self.process_width = 64  # Width of planet faces during processing
         self.activ = nn.ReLU()
         self.pool = nn.MaxPool2d(2, 2)
         self.flatten = nn.Flatten()
@@ -71,47 +71,54 @@ class Network(nn.Module):
         # Out
         self.outConv0 = nn.Conv2d(65, len(layers) * 3, 3, padding=(1, 1))
 
+        pool_sizes = [
+            int(self.process_width / (layer + 1))
+            for layer in layers
+        ]
+        self.grid_pools = [
+            nn.AvgPool3d((1, pool_sizes[i], pool_sizes[i]))
+            for i, layer in enumerate(layers)
+        ]
+
     def forward(self, x):
+        batch_size = x.shape[0]
+        # Split into faces, and flatten faces dimension into batch dimension
+        x = split_planet_into_faces(x, self.process_width - 2, padding=1).flatten(0, 1)
+
         l0 = x
-        # 128x64
+        # 64x64x1
         l1 = self.pool(self.activ(self.downConv0(l0)))
-        # 64x32x64
+        # 32x32x64
         l2 = self.pool(self.activ(self.downConv1(l1)))
-        # 32x16x128
+        # 16x16x128
         l3 = self.pool(self.activ(self.downConv2(l2)))
-        # 16x8x128
+        # 8x8x256
         l4 = self.pool(self.activ(self.downConv3(l3)))
-        # 8x4x128
-        x = self.acrossConv0(l4)
-        # 8x4x128
+        # 4x4x256
+        x = self.activ(self.acrossConv0(l4))
+        # 4x4x256
         x = torch.concat((l3, self.activ(self.upConv0(x))), dim=1)
-        # 16x8x256
+        # 8x8x512
         x = torch.concat((l2, self.activ(self.upConv1(x))), dim=1)
-        # 32x16x256
+        # 16x16x256
         x = torch.concat((l1, self.activ(self.upConv2(x))), dim=1)
-        # 64x32x128
+        # 32x32x128
         x = torch.concat((l0, self.activ(self.upConv3(x))), dim=1)
-        # 128x64x65
+        # 64x64x65
         x = self.activ(self.outConv0(x))
-        # 128x64x64
+        # 64x64x64
 
-        #TODO This all needs to be vectorized for GPU performance
-        batch_grids = []
-        imgs = []
-        for i in range(x.shape[0]):
-            grids = []
-            for j, width in enumerate(layers):
-                grids.append(
-                    torch.stack([
-                        split_planet_into_faces(x[i, j*3 + k], width + 1)
-                        for k in range(3)
-                    ], dim=-1)
-                )
-            batch_grids.append(grids)
-            imgs.append(grids_to_planet(grids, img_size)[None, :, :])
-        imgs = torch.stack(imgs)
+        # Unflatten to retrieve faces dimension
+        x = x.unflatten(0, (batch_size, 6))
+        # Pool outputs into required sizes
+        grids = [
+            self.grid_pools[i](x[:, :, i*3:i*3+3, :, :])
+            for i, layer in enumerate(layers)
+        ]
+        # Generate planet images from grids
+        x = grids_to_planet(grids, batch_size, img_size)
 
-        return batch_grids, imgs
+        return grids, x[:, None, :, :]
 
 
 net = Network().to(device)
@@ -122,7 +129,8 @@ torchsummary.summary(net, (1, img_size[1], img_size[0]))
 print("Setup")
 net.train()
 criterion = nn.MSELoss()
-optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+# optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+optimizer = optim.SGD(net.parameters(), lr=0.00001, momentum=0.1)
 
 print("Training")
 for epoch in range(2):  # loop over the dataset multiple times
