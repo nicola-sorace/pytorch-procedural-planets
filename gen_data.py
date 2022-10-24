@@ -23,11 +23,11 @@ def generate_images(num_imgs: int):
             torch.stack([gen_random_cube_grid(num_cells) for _ in range(batch_size)])
             for num_cells in layers
         ]
-        planet = grids_to_planet(grids, batch_size, img_size)
+        planet = grids_to_planet(grids, batch_size, img_size).to('cpu')
         write_png((planet[0] * 255.9).type(torch.uint8)[None, :, :], img_path)
         torch.save(grids, metadata_path)
     print("Done")
 
 
 if __name__ == '__main__':
-    generate_images(10000)
+    generate_images(20000)

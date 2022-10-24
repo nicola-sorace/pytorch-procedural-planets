@@ -30,9 +30,11 @@ class PlanetDataset(Dataset):
     def __getitem__(self, idx):
         name = self.all_names[idx]
         img = read_image(os.path.join(self.path, name + '.png')).to(device).float()
-        grids = [x.to(device) for x in torch.load(os.path.join(self.path, name + '.pt'))]
+        grids = [x.to(device) for x in torch.load(os.path.join(self.path, name + '.pt'), map_location=device)]
         return img, grids
 
+
+model_bkup_path = "model_bkup_grid_learning.pt"
 
 all_data = PlanetDataset(data_path)
 
@@ -52,6 +54,7 @@ print(f"Dataset: {len(train_data)} train, {len(test_data)} test, {len(all_data)}
 class Network(nn.Module):
     def __init__(self):
         super().__init__()
+        self.output_images = True
         self.process_width = 64  # Width of planet faces during processing
         self.activ = nn.ReLU()
         self.pool = nn.MaxPool2d(2, 2)
@@ -69,16 +72,21 @@ class Network(nn.Module):
         self.upConv2 = nn.ConvTranspose2d(256, 64, 2, stride=2)
         self.upConv3 = nn.ConvTranspose2d(128, 64, 2, stride=2)
         # Out
-        self.outConv0 = nn.Conv2d(65, len(layers) * 3, 3, padding=(1, 1))
+        # This last layer removes the padding that was introduced when planets were split into faces
+        self.outConv0 = nn.Conv2d(65, len(layers) * 3, 3)
 
         pool_sizes = [
-            int(self.process_width / (layer + 1))
+            int((self.process_width - 2) / (layer + 1))
             for layer in layers
         ]
         self.grid_pools = [
             nn.AvgPool3d((1, pool_sizes[i], pool_sizes[i]))
             for i, layer in enumerate(layers)
         ]
+
+    def set_output_images(self, output_images):
+        self.output_images = output_images
+        return self
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -106,7 +114,7 @@ class Network(nn.Module):
         x = torch.concat((l0, self.activ(self.upConv3(x))), dim=1)
         # 64x64x65
         x = self.activ(self.outConv0(x))
-        # 64x64x64
+        # 62x62x64
 
         # Unflatten to retrieve faces dimension
         x = x.unflatten(0, (batch_size, 6))
@@ -115,14 +123,20 @@ class Network(nn.Module):
             self.grid_pools[i](x[:, :, i*3:i*3+3, :, :])
             for i, layer in enumerate(layers)
         ]
-        # Generate planet images from grids
-        x = grids_to_planet(grids, batch_size, img_size)
-
-        return grids, x[:, None, :, :]
+        if self.output_images:
+            # Generate planet images from grids
+            x = grids_to_planet(grids, batch_size, img_size)
+            return grids, x[:, None, :, :]
+        else:
+            return grids
 
 
 net = Network().to(device)
 torchsummary.summary(net, (1, img_size[1], img_size[0]))
+
+#%% Load saved weights
+if os.path.isfile(model_bkup_path):
+    net.load_state_dict(torch.load(model_bkup_path, map_location=device))
 
 #%% Train
 # torch.autograd.set_detect_anomaly(True)
@@ -137,7 +151,6 @@ for epoch in range(2):  # loop over the dataset multiple times
     print(f"Epoch {epoch}")
     running_loss = 0.0
     for i, (inputs, labels) in enumerate(train_loader):
-        # optimizer.zero_grad()
         output_grids, output_imgs = net(inputs)
         loss = criterion(output_imgs, inputs)
         loss.backward()
@@ -151,7 +164,7 @@ for epoch in range(2):  # loop over the dataset multiple times
 print("Done")
 
 #%% Save model weights
-torch.save(net.state_dict(), f"model_bkup.pt")
+torch.save(net.state_dict(), model_bkup_path)
 
 #%% Result
 net.eval()

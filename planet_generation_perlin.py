@@ -80,7 +80,7 @@ def gen_random_cube_grid(num_cells: int) -> torch.Tensor:
     top = concat_face(Face.TOP, 0, 4, 5, 1, 8, 4, 9, 0, flip_top=True)
     bottom = concat_face(Face.BOTTOM, 2, 6, 7, 3, 10, 6, 11, 2, flip_bottom=True)
 
-    return torch.stack((left, front, right, back, top, bottom)).permute(0, 3, 1, 2)
+    return torch.stack((left, front, right, back, top, bottom)).permute(0, 3, 1, 2).to(device)
 
 
 def theta_phi_to_face_x_y(theta, phi):
