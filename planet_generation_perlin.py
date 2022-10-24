@@ -150,7 +150,7 @@ def split_planet_into_faces(planet, num_cells, padding=0):
 
     pad_offset = (2 / num_cells) * padding
 
-    faces = torch.arange(6).float()
+    faces = torch.arange(6).float().to(device)
     fxs = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
     fys = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
     faces, fxs, fys = torch.meshgrid(faces, fxs, fys)
@@ -267,8 +267,8 @@ def grid_to_planet(grid: torch.Tensor, img_size: Tuple[int, int]) -> torch.Tenso
 
 def planet_plot_3d(planet):
     print("Generating 3d plot...")
-    theta = torch.linspace(0, torch.pi, planet.shape[0])
-    phi = torch.linspace(0, 2*torch.pi, planet.shape[1])
+    theta = torch.linspace(0, torch.pi, planet.shape[0]).to(device)
+    phi = torch.linspace(0, 2*torch.pi, planet.shape[1]).to(device)
     phi, theta = torch.meshgrid(phi, theta)
 
     # The Cartesian coordinates of the unit sphere

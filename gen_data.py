@@ -30,4 +30,4 @@ def generate_images(num_imgs: int):
 
 
 if __name__ == '__main__':
-    generate_images(10)
+    generate_images(10000)

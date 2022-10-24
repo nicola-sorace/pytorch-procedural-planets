@@ -160,8 +160,8 @@ grids_pred, imgs_pred = net(imgs_truth)
 
 samples = 5
 imgs = zip(
-    imgs_truth[:samples].permute(0, 2, 3, 1).detach(),
-    imgs_pred[:samples].permute(0, 2, 3, 1).detach()
+    imgs_truth[:samples].permute(0, 2, 3, 1).to('cpu').detach(),
+    imgs_pred[:samples].permute(0, 2, 3, 1).to('cpu').detach()
 )
 
 fig, axs = plt.subplots(samples, 2)
