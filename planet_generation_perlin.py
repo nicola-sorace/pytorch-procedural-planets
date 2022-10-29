@@ -153,7 +153,7 @@ def split_planet_into_faces(planet, num_cells, padding=0):
     faces = torch.arange(6).float().to(device)
     fxs = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
     fys = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
-    faces, fxs, fys = torch.meshgrid(faces, fxs, fys)
+    fys, fxs, faces = torch.meshgrid(fys, fxs, faces)
     faces = faces.int()
 
     theta, phi = face_x_y_to_theta_phi(faces, fxs, fys)
@@ -172,7 +172,15 @@ def split_planet_into_faces(planet, num_cells, padding=0):
         )
     )
 
-    return planet[:, :, theta, phi].permute(0, 2, 1, 3, 4)
+    out = planet[:, :, theta, phi].permute(0, 4, 1, 2, 3)
+
+    # TODO Why are some x/y axes flipped, and faces in wrong order?
+    out[:, 4:6] = out[:, 4:6].flip(4)  # Flip x-axis on top/bottom faces
+    out[:, 0:4] = out[:, 0:4].flip(3)  # Flip y-axis on other axes
+
+    out = out[:, (2, 3, 0, 1, 4, 5)]
+
+    return out
 
 
 def face_x_y_to_x_y_z(faces, fxs, fys):
@@ -309,12 +317,12 @@ if __name__ == '__main__':
     ]
     planets = grids_to_planet(grids, batch_size, img_size)
 
-    plt.imshow(planets[0], cmap=colormap)
+    plt.imshow(planets[0], cmap=colormap, vmin=0, vmax=1)
     plt.show()
     planet_plot_3d(planets[0])
 
     faces = split_planet_into_faces(planets[:, None, :, :], 32)[0, :, 0, :, :]
     fig, axs = plt.subplots(6, 1)
     for ax, face in zip(axs, faces):
-        ax.imshow(face, cmap=colormap)
+        ax.imshow(face, cmap=colormap, vmin=0, vmax=1)
     fig.show()

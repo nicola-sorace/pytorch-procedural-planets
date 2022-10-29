@@ -11,23 +11,29 @@ if not os.path.isdir(data_path):
 
 
 def generate_images(num_imgs: int):
-    batch_size = 1  # TODO Could generate images in batches for better performance
-    for i in range(num_imgs):
-        name = ''.join([random.choice(string.ascii_lowercase) for _ in range(16)])
-        img_path = os.path.join(data_path, name + ".png")
-        metadata_path = os.path.join(data_path, name + ".pt")
-        assert not os.path.isfile(img_path)
-        print(f"Generating '{name}' ({i+1}/{num_imgs})")
+    batch_size = 128
 
+    if num_imgs % batch_size != 0:
+        raise RuntimeError("Batch size must divide number of images")
+
+    num_batches = int(num_imgs / batch_size)
+    for i in range(num_batches):
+        print(f"Generating batch {i}/{num_batches}...")
         grids = [
             torch.stack([gen_random_cube_grid(num_cells) for _ in range(batch_size)])
             for num_cells in layers
         ]
-        planet = grids_to_planet(grids, batch_size, img_size).to('cpu')
-        write_png((planet[0] * 255.9).type(torch.uint8)[None, :, :], img_path)
-        torch.save(grids, metadata_path)
+        planets = grids_to_planet(grids, batch_size, img_size).to('cpu')
+        for j in range(batch_size):
+            name = ''.join([random.choice(string.ascii_lowercase) for _ in range(16)])
+            print(f"Saving image {i*batch_size + j + 1}/{num_imgs} ({name})")
+            img_path = os.path.join(data_path, name + ".png")
+            metadata_path = os.path.join(data_path, name + ".pt")
+            assert not os.path.isfile(img_path)
+            write_png((planets[j] * 255.9).type(torch.uint8)[None, :, :], img_path)
+            torch.save([grid[j] for grid in grids], metadata_path)
     print("Done")
 
 
 if __name__ == '__main__':
-    generate_images(20000)
+    generate_images(64000)
