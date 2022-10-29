@@ -153,7 +153,7 @@ def split_planet_into_faces(planet, num_cells, padding=0):
     faces = torch.arange(6).float().to(device)
     fxs = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
     fys = torch.linspace(-1 - pad_offset, 1 + pad_offset, num_cells + 2*padding).to(device)
-    fys, fxs, faces = torch.meshgrid(fys, fxs, faces)
+    fys, fxs, faces = torch.meshgrid(fys, fxs, faces, indexing='ij')
     faces = faces.int()
 
     theta, phi = face_x_y_to_theta_phi(faces, fxs, fys)
@@ -268,7 +268,7 @@ def grid_to_planet(grid: torch.Tensor, img_size: Tuple[int, int]) -> torch.Tenso
     num_cells = grid.shape[-1] - 1
     theta = torch.linspace(0, torch.pi, img_size[1]).to(device)
     phi = torch.linspace(0, 2*torch.pi, img_size[0]).to(device)
-    theta, phi = torch.meshgrid(theta, phi)
+    theta, phi = torch.meshgrid(theta, phi, indexing='ij')
 
     return theta_phi_to_val(grid, num_cells, theta, phi)
 
@@ -277,7 +277,7 @@ def planet_plot_3d(planet):
     print("Generating 3d plot...")
     theta = torch.linspace(0, torch.pi, planet.shape[0]).to(device)
     phi = torch.linspace(0, 2*torch.pi, planet.shape[1]).to(device)
-    phi, theta = torch.meshgrid(phi, theta)
+    phi, theta = torch.meshgrid(phi, theta, indexing='ij')
 
     # The Cartesian coordinates of the unit sphere
     x = torch.sin(theta) * torch.cos(phi)
