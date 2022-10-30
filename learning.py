@@ -103,27 +103,27 @@ class Network(nn.Module):
     def __init__(self):
         super(Network, self).__init__()
         self.output_images = True
-        self.process_width = 64  # Width of planet faces during processing
+        self.process_width = 32  # Width of planet faces during processing
+        self.peek_padding = 1  # Number of pixels to peek beyond face edge
         self.activ = nn.ReLU()
         self.outActiv = nn.Tanh()  # Output needs to be in [-1, 1]
         self.pool = nn.MaxPool2d(2, 2)
         self.flatten = nn.Flatten()
 
         # Down-path
-        self.downLayer0 = DownLayer(1, 32, 3, (1, 1), 2, self.activ, self.pool)
-        self.downLayer1 = DownLayer(32, 64, 3, (1, 1), 2, self.activ, self.pool)
-        self.downLayer2 = DownLayer(64, 128, 3, (1, 1), 2, self.activ, self.pool)
-        self.downLayer3 = DownLayer(128, 256, 3, (1, 1), 2, self.activ, self.pool)
+        self.downLayer0 = DownLayer(1, 32, 3, 'same', 2, self.activ, self.pool)
+        self.downLayer1 = DownLayer(32, 64, 3, 'same', 2, self.activ, self.pool)
+        self.downLayer2 = DownLayer(64, 128, 3, 'same', 2, self.activ, self.pool)
+        self.downLayer3 = DownLayer(128, 256, 3, 'same', 2, self.activ, self.pool)
 
         # Up-path
-        self.upLayer0 = UpLayer(256, 128, 256, 3, 2, (1, 1), 2, self.activ)
-        self.upLayer1 = UpLayer(256, 64, 128, 3, 2, (1, 1), 2, self.activ)
-        self.upLayer2 = UpLayer(128, 32, 64, 3, 2, (1, 1), 2, self.activ)
-        self.upLayer3 = UpLayer(64, 1, 33, 3, 2, (1, 1), 2, self.activ)
+        self.upLayer0 = UpLayer(256, 128, 256, 3, 2, 'same', 2, self.activ)
+        self.upLayer1 = UpLayer(256, 64, 128, 3, 2, 'same', 2, self.activ)
+        self.upLayer2 = UpLayer(128, 32, 64, 3, 2, 'same', 2, self.activ)
+        self.upLayer3 = UpLayer(64, 1, 33, 3, 2, 'same', 2, self.activ)
 
         # Out
-        # This finally removes the padding that was introduced when planets were split into faces
-        self.outConv0 = nn.Conv2d(33, len(layers) * 3, 3)
+        self.outConv0 = nn.Conv2d(33, len(layers) * 3, 3, padding=(1, 1))
 
         pool_sizes = [
             int((self.process_width - 2) / (layer + 1))
@@ -140,8 +140,9 @@ class Network(nn.Module):
 
     def forward(self, x):
         batch_size = x.shape[0]
-        # Split into faces, and flatten faces dimension into batch dimension
-        l0 = split_planet_into_faces(x, self.process_width - 2, padding=1).flatten(0, 1)
+        # Split into faces (peeking beyond edges), and flatten faces dimension into batch dimension
+        l0 = split_planet_into_faces(x, self.process_width - 2*self.peek_padding, padding=self.peek_padding)\
+            .flatten(0, 1)
 
         # Down-path
         l1 = self.downLayer0(l0)             # -> 32x32x32
@@ -153,6 +154,10 @@ class Network(nn.Module):
         x = self.upLayer1(x, l2)             # -> 16x16x256
         x = self.upLayer2(x, l1)             # -> 32x32x128
         x = self.upLayer3(x, l0)             # -> 64x64x65
+
+        # Remove the padding that was introduced when planets were split into faces
+        x = x[:, :, self.peek_padding:-self.peek_padding, self.peek_padding:-self.peek_padding]
+
         # Out
         x = self.outActiv(self.outConv0(x))  # -> 62x62x64
 
@@ -173,6 +178,7 @@ class Network(nn.Module):
 
 net = Network().to(device)
 # torchsummary.summary(net, (1, img_size[1], img_size[0]))
+print(f"Model parameters: {sum(p.numel() for p in net.parameters() if p.requires_grad)}")
 
 #%% Load saved weights
 if os.path.isfile(model_bkup_path):
@@ -217,7 +223,7 @@ try:
                 print((
                     f'[{100 * i / len(train_loader):.0f}%] '
                     f'loss: {running_loss / print_interval:.8f} '
-                    f'({(batch_size * print_interval) / (end_time - start_time)} imgs/sec)'
+                    f'({(batch_size * print_interval) / (end_time - start_time):.0f} imgs/sec)'
                 ))
                 running_loss = 0.0
                 start_time = time.time()
