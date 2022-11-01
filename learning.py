@@ -12,7 +12,7 @@ from torchvision.io import read_image
 import torchsummary
 import matplotlib.pyplot as plt
 from matplotlib import cm
-from planet_generation_perlin import grids_to_planet, split_planet_into_faces
+from planet_generation_perlin import grids_to_planet, split_planet_into_faces, apply_offset
 from conf import device, data_path, img_size, layers
 
 
@@ -104,14 +104,14 @@ class Network(nn.Module):
         super(Network, self).__init__()
         self.output_images = True
         self.process_width = 32  # Width of planet faces during processing
-        self.peek_padding = 1  # Number of pixels to peek beyond face edge
         self.activ = nn.ReLU()
         self.outActiv = nn.Tanh()  # Output needs to be in [-1, 1]
         self.pool = nn.MaxPool2d(2, 2)
         self.flatten = nn.Flatten()
 
         # Down-path
-        self.downLayer0 = DownLayer(1, 32, 3, 'same', 2, self.activ, self.pool)
+        in_channels = 1 + 4 * len(layers)
+        self.downLayer0 = DownLayer(in_channels, 32, 3, 'same', 2, self.activ, self.pool)
         self.downLayer1 = DownLayer(32, 64, 3, 'same', 2, self.activ, self.pool)
         self.downLayer2 = DownLayer(64, 128, 3, 'same', 2, self.activ, self.pool)
         self.downLayer3 = DownLayer(128, 256, 3, 'same', 2, self.activ, self.pool)
@@ -120,10 +120,10 @@ class Network(nn.Module):
         self.upLayer0 = UpLayer(256, 128, 256, 3, 2, 'same', 2, self.activ)
         self.upLayer1 = UpLayer(256, 64, 128, 3, 2, 'same', 2, self.activ)
         self.upLayer2 = UpLayer(128, 32, 64, 3, 2, 'same', 2, self.activ)
-        self.upLayer3 = UpLayer(64, 1, 33, 3, 2, 'same', 2, self.activ)
+        self.upLayer3 = UpLayer(64, in_channels, 32 + in_channels, 3, 2, 'same', 2, self.activ)
 
         # Out
-        self.outConv0 = nn.Conv2d(33, len(layers) * 3, 3, padding=(1, 1))
+        self.outConv0 = nn.Conv2d(32 + in_channels, len(layers) * 3, 3, padding=(1, 1))
 
         pool_sizes = [
             int((self.process_width - 2) / (layer + 1))
@@ -139,10 +139,20 @@ class Network(nn.Module):
         return self
 
     def forward(self, x):
-        batch_size = x.shape[0]
+        # Super-impose the location of nodes onto the region they interpolate to
+        x = torch.concat([x] + [
+            torch.concat([
+                apply_offset(
+                    x,
+                    torch.FloatTensor([i * torch.pi / 4 / l]).to(device),
+                    torch.FloatTensor([j * torch.pi / 4 / l]).to(device))
+                for i, j in [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+            ], 1)
+            for l in layers
+        ], 1)
+
         # Split into faces (peeking beyond edges), and flatten faces dimension into batch dimension
-        l0 = split_planet_into_faces(x, self.process_width - 2*self.peek_padding, padding=self.peek_padding)\
-            .flatten(0, 1)
+        l0 = split_planet_into_faces(x, self.process_width).flatten(0, 1)
 
         # Down-path
         l1 = self.downLayer0(l0)             # -> 32x32x32
@@ -154,9 +164,6 @@ class Network(nn.Module):
         x = self.upLayer1(x, l2)             # -> 16x16x256
         x = self.upLayer2(x, l1)             # -> 32x32x128
         x = self.upLayer3(x, l0)             # -> 64x64x65
-
-        # Remove the padding that was introduced when planets were split into faces
-        x = x[:, :, self.peek_padding:-self.peek_padding, self.peek_padding:-self.peek_padding]
 
         # Out
         x = self.outActiv(self.outConv0(x))  # -> 62x62x64
@@ -190,8 +197,8 @@ if os.path.isfile(model_bkup_path):
 net.train()
 criterion = nn.MSELoss()
 
-optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
-# optimizer = optim.SGD(net.parameters(), lr=0.00001, momentum=0.1)
+# optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+optimizer = optim.SGD(net.parameters(), lr=0.00001, momentum=0.1)
 # optimizer = optim.SGD(net.parameters(), lr=0.000001, momentum=0.9)
 scheduler = optim.lr_scheduler.LambdaLR(
     optimizer,
@@ -201,7 +208,7 @@ scheduler = optim.lr_scheduler.LambdaLR(
 try:
     print("Training")
     print_interval = int(len(train_loader) / 100)
-    for epoch in range(2):  # loop over the dataset multiple times
+    for epoch in range(100):
         print(f"Epoch {epoch}")
         running_loss = 0.0
         start_time = time.time()

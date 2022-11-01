@@ -37,6 +37,15 @@ def dot(a, b):
     return a[0, :, :, :] * b[0, :, :] + a[1, :, :, :] * b[1, :, :] + a[2, :, :, :] * b[2, :, :]
 
 
+def get_theta_phi(img_size):
+    theta = torch.linspace(0, torch.pi, img_size[1]).to(device)
+    phi = torch.concat((
+        torch.linspace(torch.pi, 2*torch.pi, int(img_size[0] / 2)).to(device),
+        torch.linspace(0, torch.pi, int(img_size[0] / 2)).to(device),
+    ))
+    return torch.meshgrid(theta, phi, indexing='ij')
+
+
 def gen_random_cube_grid(num_cells: int) -> torch.Tensor:
     """
     Generate a grid of random values for each face of a cube, where values
@@ -127,11 +136,7 @@ def theta_phi_to_face_x_y(theta, phi):
     return faces, face_xs, face_ys
 
 
-def face_x_y_to_theta_phi(faces, fxs, fys):
-    ps = face_x_y_to_x_y_z(faces, fxs, fys)
-    xs = ps[0, :, :, :]
-    ys = ps[1, :, :, :]
-    zs = ps[2, :, :, :]
+def x_y_z_to_theta_phi(xs, ys, zs):
     theta = torch.arccos(zs / torch.sqrt(xs*xs + ys*ys + zs*zs))
     phi = torch.arctan2(ys, xs) + torch.pi
     # mask = (xs < 0) & (ys >= 0)
@@ -145,9 +150,16 @@ def face_x_y_to_theta_phi(faces, fxs, fys):
     return theta, phi
 
 
-def split_planet_into_faces(planet, num_cells, padding=0):
-    img_size = planet.shape[-2:]
+def face_x_y_to_theta_phi(faces, fxs, fys):
+    ps = face_x_y_to_x_y_z(faces, fxs, fys)
+    xs = ps[0, :, :, :]
+    ys = ps[1, :, :, :]
+    zs = ps[2, :, :, :]
+    theta, phi = x_y_z_to_theta_phi(xs, ys, zs)
+    return theta, phi
 
+
+def split_planet_into_faces(planet, num_cells, padding=0):
     pad_offset = (2 / num_cells) * padding
 
     faces = torch.arange(6).float().to(device)
@@ -157,30 +169,8 @@ def split_planet_into_faces(planet, num_cells, padding=0):
     faces = faces.int()
 
     theta, phi = face_x_y_to_theta_phi(faces, fxs, fys)
-    theta = torch.max(
-        torch.LongTensor([0]).to(device),
-        torch.min(
-            torch.LongTensor([img_size[0] - 1]).to(device),
-            (img_size[0] * theta / torch.pi).long()
-        )
-    )
-    phi = torch.max(
-        torch.LongTensor([0]).to(device),
-        torch.min(
-            torch.LongTensor([img_size[1] - 1]).to(device),
-            (img_size[1] * phi / (2 * torch.pi)).long()
-        )
-    )
-
-    out = planet[:, :, theta, phi].permute(0, 4, 1, 2, 3)
-
-    # TODO Why are some x/y axes flipped, and faces in wrong order?
-    out[:, 4:6] = out[:, 4:6].flip(4)  # Flip x-axis on top/bottom faces
-    out[:, 0:4] = out[:, 0:4].flip(3)  # Flip y-axis on other axes
-
-    out = out[:, (2, 3, 0, 1, 4, 5)]
-
-    return out
+    theta_i, phi_i = theta_phi_to_indices(theta, phi)
+    return planet[:, :, theta_i, phi_i].permute(0, 4, 1, 2, 3)
 
 
 def face_x_y_to_x_y_z(faces, fxs, fys):
@@ -220,6 +210,13 @@ def face_x_y_to_x_y_z(faces, fxs, fys):
     zs[faces == Face.BOTTOM] = -fzs[faces == Face.BOTTOM]
 
     return torch.stack((xs, ys, zs))
+
+
+def theta_phi_to_x_y_z(theta, phi):
+    xs = torch.sin(theta) * torch.cos(phi)
+    ys = torch.sin(theta) * torch.sin(phi)
+    zs = torch.cos(theta)
+    return xs, ys, zs
 
 
 def theta_phi_to_val(grid, num_cells, theta, phi):
@@ -266,10 +263,7 @@ def theta_phi_to_val(grid, num_cells, theta, phi):
 
 def grid_to_planet(grid: torch.Tensor, img_size: Tuple[int, int]) -> torch.Tensor:
     num_cells = grid.shape[-1] - 1
-    theta = torch.linspace(0, torch.pi, img_size[1]).to(device)
-    phi = torch.linspace(0, 2*torch.pi, img_size[0]).to(device)
-    theta, phi = torch.meshgrid(theta, phi, indexing='ij')
-
+    theta, phi = get_theta_phi(img_size)
     return theta_phi_to_val(grid, num_cells, theta, phi)
 
 
@@ -278,11 +272,7 @@ def planet_plot_3d(planet):
     theta = torch.linspace(0, torch.pi, planet.shape[0]).to(device)
     phi = torch.linspace(0, 2*torch.pi, planet.shape[1]).to(device)
     phi, theta = torch.meshgrid(phi, theta, indexing='ij')
-
-    # The Cartesian coordinates of the unit sphere
-    x = torch.sin(theta) * torch.cos(phi)
-    y = torch.sin(theta) * torch.sin(phi)
-    z = torch.cos(theta)
+    x, y, z = theta_phi_to_x_y_z(theta, phi)
 
     # Normalize values
     fmax, fmin = planet.max(), planet.min()
@@ -309,6 +299,51 @@ def grids_to_planet(grids, batch_size, img_size):
     return planet
 
 
+def rotation_matrix(ax, ang):
+    cos = torch.cos(ang)
+    nCos = 1 - cos
+    sin = torch.sin(ang)
+    x, y, z = ax
+    return torch.Tensor([
+        [cos + x**2 * nCos,       x * y * nCos - z * sin,  x * z * nCos + y * sin],
+        [y * x * nCos + z * sin,  cos + y**2 * nCos,       y * z * nCos - x * sin],
+        [z * x * nCos - y * sin,  z * y * nCos + x * sin,  cos + z**2 * nCos]
+    ]).to(device)
+
+
+def theta_phi_to_indices(theta, phi):
+    theta_i = torch.max(
+        torch.LongTensor([0]).to(device),
+        torch.min(
+            torch.LongTensor([img_size[1] - 1]).to(device),
+            (img_size[1] * theta / torch.pi).long()
+        )
+    )
+    phi_i = torch.max(
+        torch.LongTensor([0]).to(device),
+        torch.min(
+            torch.LongTensor([img_size[0] - 1]).to(device),
+            (img_size[0] * phi / (2 * torch.pi)).long()
+        )
+    )
+    return theta_i, phi_i
+
+
+def apply_offset(planet, dt, dp):
+    """
+    Rotate the planet, transforming coordinates (theta, phi) -> (theta + dt, phi + dp)
+    """
+    theta, phi = get_theta_phi(img_size)
+    x, y, z = theta_phi_to_x_y_z(theta, phi)
+    rot = rotation_matrix([0, 0, 1], dp) @ rotation_matrix([1, 0, 0], dt)
+    ps = torch.stack((x, y, z)).flatten(1, 2)
+    ps = (rot @ ps).unflatten(1, (img_size[1], img_size[0]))
+    theta, phi = x_y_z_to_theta_phi(ps[0], ps[1], ps[2])
+
+    theta_i, phi_i = theta_phi_to_indices(theta, phi)
+    return planet[:, :, theta_i, phi_i]
+
+
 if __name__ == '__main__':
     batch_size = 2
     grids = [
@@ -320,6 +355,14 @@ if __name__ == '__main__':
     plt.imshow(planets[0], cmap=colormap, vmin=0, vmax=1)
     plt.show()
     planet_plot_3d(planets[0])
+
+    rot_planets = apply_offset(
+        planets[:, None, :, :],
+        torch.Tensor([torch.pi / 10]).to(device),
+        torch.Tensor([0]).to(device)
+    )
+    plt.imshow(rot_planets[0, 0], cmap=colormap, vmin=0, vmax=1)
+    plt.show()
 
     faces = split_planet_into_faces(planets[:, None, :, :], 32)[0, :, 0, :, :]
     fig, axs = plt.subplots(6, 1)
