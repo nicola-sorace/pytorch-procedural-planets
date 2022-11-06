@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import random_split
 from torchvision.io import read_image
 import torchsummary
+from progress.bar import IncrementalBar
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from planet_generation_perlin import grids_to_planet, split_planet_into_faces, apply_offset
@@ -46,6 +47,7 @@ test_size = len(all_data) - train_size
 train_data, test_data = random_split(all_data, [train_size, test_size])
 
 batch_size = 64
+num_batches = 500
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
                                            shuffle=True, num_workers=2 if device == 'cpu' else 0)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
@@ -187,14 +189,6 @@ net = Network().to(device)
 # torchsummary.summary(net, (1, img_size[1], img_size[0]))
 print(f"Model parameters: {sum(p.numel() for p in net.parameters() if p.requires_grad)}")
 
-#%% Load saved weights
-if os.path.isfile(model_bkup_path):
-    print("Continuing from checkpoint")
-    net.load_state_dict(torch.load(model_bkup_path, map_location=device))
-
-#%% Train
-# torch.autograd.set_detect_anomaly(True)
-net.train()
 criterion = nn.MSELoss()
 
 # optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
@@ -205,82 +199,145 @@ scheduler = optim.lr_scheduler.LambdaLR(
     lambda epoch: 0.8 ** epoch
 )
 
-try:
+losses = []
+val_losses = []
+
+
+#%% Load saved weights
+if os.path.isfile(model_bkup_path):
+    print("Continuing from checkpoint")
+    weights, losses, val_losses = torch.load(model_bkup_path, map_location=device)
+    net.load_state_dict(weights)
+
+#%% Train
+
+
+class EpochBar(IncrementalBar):
+
+    @property
+    def suffix(self):
+        if self.val_loss is None:
+            return "[%(index)d/%(max)d] Loss: %(loss).8f (%(runtime).0f imgs/sec)"
+        else:
+            return "[%(index)d/%(max)d] Loss: %(loss).8f (%(runtime).0f imgs/sec) | Val Loss: %(val_loss).8f"
+
+    def __init__(self, name, max: int):
+        super().__init__(name, max=max)
+        self.loss = 0
+        self.val_loss = None
+
+    def next(self, loss, runtime, val_loss=None):
+        self.loss = loss
+        self.runtime = runtime
+        self.val_loss = val_loss
+        super().next()
+
+
+if __name__ == "__main__":
+    # torch.autograd.set_detect_anomaly(True)
+    net.train()
     print("Training")
-    print_interval = int(len(train_loader) / 100)
-    for epoch in range(100):
-        print(f"Epoch {epoch}")
-        running_loss = 0.0
-        start_time = time.time()
-        for i, (inputs, labels) in enumerate(train_loader):
-            output_grids, output_imgs = net(inputs)
-            loss = criterion(output_imgs, inputs)
+    try:
+        for epoch in range(num_batches):
+            running_loss = 0.0
+            start_time = time.time()
+            bar = EpochBar(f"Epoch {epoch}", max=len(train_loader))
+            for i, (inputs, labels) in enumerate(train_loader):
+                output_grids, output_imgs = net(inputs)
+                loss = criterion(output_imgs, inputs)
 
-            # # Alternatively train by grid loss instead of image loss
-            # loss = criterion(
-            #     torch.concat([x.flatten() for x in output_grids]),
-            #     torch.concat([x.flatten() for x in labels]),
-            # )
-            loss.backward()
-            optimizer.step()
+                # # Alternatively train by grid loss instead of image loss
+                # loss = criterion(
+                #     torch.concat([x.flatten() for x in output_grids]),
+                #     torch.concat([x.flatten() for x in labels]),
+                # )
+                loss.backward()
+                optimizer.step()
 
-            running_loss += loss.item()
-            if i % print_interval == print_interval - 1:
-                end_time = time.time()
-                print((
-                    f'[{100 * i / len(train_loader):.0f}%] '
-                    f'loss: {running_loss / print_interval:.8f} '
-                    f'({(batch_size * print_interval) / (end_time - start_time):.0f} imgs/sec)'
-                ))
-                running_loss = 0.0
-                start_time = time.time()
-        scheduler.step()
-        print(optimizer.param_groups[0]['lr'])
+                running_loss += loss.item()
+                loss = running_loss / (i + 1)
+                imgs_per_sec = batch_size / ((time.time() - start_time) / (i + 1))
+                bar.next(loss, imgs_per_sec)
 
-    torch.save(net.state_dict(), model_bkup_path)
-    print("Done")
-except KeyboardInterrupt:
-    print('\n')
-    while True:
-        try:
-            choice = input("Save? (Y/n) ")
-            if choice in ['y', 'Y']:
-                torch.save(net.state_dict(), model_bkup_path)
-                break
-            if choice in ['n', 'N']:
-                break
-        except KeyboardInterrupt:
-            pass
-        print("Invalid choice")
+            running_val_loss = 0.0
+            for i, (inputs, labels) in enumerate(test_loader):
+                output_grids, output_imgs = net(inputs)
+                loss = criterion(output_imgs, inputs)
+                running_val_loss += loss.item()
+            val_loss = running_val_loss / len(test_loader)
+            bar.next(loss, imgs_per_sec, val_loss)
+            losses.append(loss)
+            val_losses.append(val_loss)
+
+            bar.finish()
+            scheduler.step()
+        torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
+        print("Done")
+    except KeyboardInterrupt:
+        print('\n')
+        while True:
+            try:
+                choice = input("Save? (Y/n) ")
+                if choice in ['y', 'Y']:
+                    torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
+                    break
+                if choice in ['n', 'N']:
+                    break
+            except KeyboardInterrupt:
+                pass
+            print("Invalid choice")
 
 #%% Result
-net.eval()
-imgs_truth, vals_truth = next(iter(test_loader))
-grids_pred, imgs_pred = net(imgs_truth)
+if __name__ == "__main__":
+    # Plot loss trace
+    fig, ax = plt.subplots()
+    ax.plot(
+        range(len(losses)),
+        losses,
+        label="Training Loss",
+        color='blue'
+    )
+    ax.plot(
+        range(len(val_losses)),
+        val_losses,
+        label="Validation Loss",
+        color='orange'
+    )
+    ax.legend()
+    fig.show()
+    fig.savefig("losses.png")
 
-samples = 5
-imgs = zip(
-    imgs_truth[:samples].permute(0, 2, 3, 1).to('cpu').detach(),
-    imgs_pred[:samples].permute(0, 2, 3, 1).to('cpu').detach()
-)
+    net.eval()
+    imgs_truth, vals_truth = next(iter(test_loader))
+    grids_pred, imgs_pred = net(imgs_truth)
 
-grids = zip(
-    [torch.concat([vals_truth[j][i].flatten().to('cpu').detach() for j in range(3)]) for i in range(samples)],
-    [torch.concat([grids_pred[j][i].flatten().to('cpu').detach() for j in range(3)]) for i in range(samples)],
-)
+    samples = 5
+    imgs = zip(
+        imgs_truth[:samples].permute(0, 2, 3, 1).to('cpu').detach(),
+        imgs_pred[:samples].permute(0, 2, 3, 1).to('cpu').detach()
+    )
 
-# Plot images
-fig, axs = plt.subplots(samples, 2)
-for ax, img in zip(axs, imgs):
-    for i in range(2):
-        ax[i].imshow(img[i], cmap=colormap, vmin=0, vmax=1)
-        ax[i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-fig.show()
+    grids = zip(
+        [torch.concat([vals_truth[j][i].flatten().to('cpu').detach() for j in range(3)]) for i in range(samples)],
+        [torch.concat([grids_pred[j][i].flatten().to('cpu').detach() for j in range(3)]) for i in range(samples)],
+    )
 
-# Plot grid value distributions
-fig, axs = plt.subplots(samples, 2, sharex=True)
-for ax, img in zip(axs, grids):
-    for i in range(2):
-        ax[i].hist(img[i].detach(), 100)
-        ax[i].set(xlim=(-1, 1))
-fig.show()
+    # Plot images
+    fig, axs = plt.subplots(samples, 2)
+    for ax, img in zip(axs, imgs):
+        for i in range(2):
+            ax[i].imshow(img[i], cmap=colormap, vmin=0, vmax=1)
+            ax[i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+        print(f"Loss: {criterion(img[0], img[1])}")
+    fig.show()
+    fig.savefig("images.png")
+
+    # Plot grid value distributions
+    fig, axs = plt.subplots(samples, 2, sharex=True)
+    for ax, img in zip(axs, grids):
+        for i in range(2):
+            ax[i].hist(img[i].detach(), 100)
+            ax[i].set(xlim=(-1, 1))
+    fig.show()
+    fig.savefig("grid_distributions.png")
+
