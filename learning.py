@@ -3,6 +3,7 @@ Neural network which tries to retrieve Perlin gradients from a final planet imag
 """
 import os
 import time
+import traceback
 import torch
 from torch import nn
 from torch import optim
@@ -211,8 +212,15 @@ if os.path.isfile(model_bkup_path):
 
 #%% Train
 
+def save():
+    torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
+
 
 class EpochBar(IncrementalBar):
+    def __init__(self, name, max: int):
+        super().__init__(name, max=max)
+        self.loss = 0
+        self.val_loss = None
 
     @property
     def suffix(self):
@@ -220,11 +228,6 @@ class EpochBar(IncrementalBar):
             return "[%(index)d/%(max)d] Loss: %(loss).8f (%(runtime).0f imgs/sec)"
         else:
             return "[%(index)d/%(max)d] Loss: %(loss).8f (%(runtime).0f imgs/sec) | Val Loss: %(val_loss).8f"
-
-    def __init__(self, name, max: int):
-        super().__init__(name, max=max)
-        self.loss = 0
-        self.val_loss = None
 
     def next(self, loss, runtime, val_loss=None):
         self.loss = loss
@@ -271,7 +274,7 @@ if __name__ == "__main__":
 
             bar.finish()
             scheduler.step()
-        torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
+        save()
         print("Done")
     except KeyboardInterrupt:
         print('\n')
@@ -279,13 +282,16 @@ if __name__ == "__main__":
             try:
                 choice = input("Save? (Y/n) ")
                 if choice in ['y', 'Y']:
-                    torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
+                    save()
                     break
                 if choice in ['n', 'N']:
                     break
             except KeyboardInterrupt:
                 pass
             print("Invalid choice")
+    except Exception as e:
+        traceback.print_exc()
+        save()
 
 #%% Result
 if __name__ == "__main__":
