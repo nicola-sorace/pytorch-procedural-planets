@@ -10,12 +10,18 @@ from torch import optim
 from torch.utils.data import Dataset
 from torch.utils.data import random_split
 from torchvision.io import read_image
-import torchsummary
 from progress.bar import IncrementalBar
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from planet_generation_perlin import grids_to_planet, split_planet_into_faces, apply_offset
 from conf import device, data_path, img_size, layers
+
+#%% Params
+batch_size = 64
+train_test_split = 0.8
+num_batches = 500
+model_bkup_path = "model_bkup.pt"
+colormap = cm.turbo
 
 
 #%% Setup data
@@ -38,17 +44,12 @@ class PlanetDataset(Dataset):
         return img, grids
 
 
-model_bkup_path = "model_bkup.pt"
-colormap = cm.turbo
-
 all_data = PlanetDataset(data_path)
 
-train_size = int(len(all_data) * 0.7)
+train_size = int(len(all_data) * train_test_split)
 test_size = len(all_data) - train_size
 train_data, test_data = random_split(all_data, [train_size, test_size])
 
-batch_size = 64
-num_batches = 500
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
                                            shuffle=True, num_workers=2 if device == 'cpu' else 0)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
@@ -155,6 +156,7 @@ class Network(nn.Module):
         ], 1)
 
         # Split into faces (peeking beyond edges), and flatten faces dimension into batch dimension
+        orig_batch_size = x.shape[0]
         l0 = split_planet_into_faces(x, self.process_width).flatten(0, 1)
 
         # Down-path
@@ -172,7 +174,7 @@ class Network(nn.Module):
         x = self.outActiv(self.outConv0(x))  # -> 62x62x64
 
         # Unflatten to retrieve faces dimension
-        x = x.unflatten(0, (batch_size, 6))
+        x = x.unflatten(0, (orig_batch_size, 6))
         # Pool outputs into required sizes
         grids = [
             self.grid_pools[i](x[:, :, i*3:i*3+3, :, :])
@@ -187,7 +189,6 @@ class Network(nn.Module):
 
 
 net = Network().to(device)
-# torchsummary.summary(net, (1, img_size[1], img_size[0]))
 print(f"Model parameters: {sum(p.numel() for p in net.parameters() if p.requires_grad)}")
 
 criterion = nn.MSELoss()
@@ -211,6 +212,7 @@ if os.path.isfile(model_bkup_path):
     net.load_state_dict(weights)
 
 #%% Train
+
 
 def save():
     torch.save((net.state_dict(), losses, val_losses), model_bkup_path)
@@ -238,35 +240,41 @@ class EpochBar(IncrementalBar):
 
 if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
-    net.train()
+    net.train().set_output_images(False)
+    last_epoch = len(losses) - 1
     print("Training")
     try:
-        for epoch in range(num_batches):
+        for epoch in range(last_epoch, num_batches):
             running_loss = 0.0
             start_time = time.time()
             bar = EpochBar(f"Epoch {epoch}", max=len(train_loader))
             for i, (inputs, labels) in enumerate(train_loader):
                 output_grids, output_imgs = net(inputs)
-                loss = criterion(output_imgs, inputs)
+                # loss = criterion(output_imgs, inputs)
 
-                # # Alternatively train by grid loss instead of image loss
-                # loss = criterion(
-                #     torch.concat([x.flatten() for x in output_grids]),
-                #     torch.concat([x.flatten() for x in labels]),
-                # )
+                loss = criterion(
+                    torch.concat([x.flatten() for x in output_grids]),
+                    torch.concat([x.flatten() for x in labels]),
+                )
                 loss.backward()
                 optimizer.step()
 
-                running_loss += loss.item()
+                running_loss += float(loss.item())
                 loss = running_loss / (i + 1)
-                imgs_per_sec = batch_size / ((time.time() - start_time) / (i + 1))
+                imgs_per_sec = (batch_size * (i + 1)) / (time.time() - start_time)
                 bar.next(loss, imgs_per_sec)
 
             running_val_loss = 0.0
             for i, (inputs, labels) in enumerate(test_loader):
                 output_grids, output_imgs = net(inputs)
-                loss = criterion(output_imgs, inputs)
-                running_val_loss += loss.item()
+                # loss = criterion(output_imgs, inputs)
+
+                loss = criterion(
+                    torch.concat([x.flatten() for x in output_grids]),
+                    torch.concat([x.flatten() for x in labels]),
+                )
+
+                running_val_loss += float(loss.item())
             val_loss = running_val_loss / len(test_loader)
             bar.next(loss, imgs_per_sec, val_loss)
             losses.append(loss)
@@ -313,7 +321,7 @@ if __name__ == "__main__":
     fig.show()
     fig.savefig("losses.png")
 
-    net.eval()
+    net.eval().set_output_images(True)
     imgs_truth, vals_truth = next(iter(test_loader))
     grids_pred, imgs_pred = net(imgs_truth)
 
@@ -347,3 +355,11 @@ if __name__ == "__main__":
     fig.show()
     fig.savefig("grid_distributions.png")
 
+    # Test earth image
+    earth_img = read_image("earth.png").to(device).float() / 255.0
+    grid_pred, img_pred = net(earth_img[:, None, :, :])
+    fig, axs = plt.subplots(2)
+    axs[0].imshow(earth_img[0].to('cpu').detach(), cmap=colormap, vmin=0, vmax=1)
+    axs[1].imshow(img_pred[0].permute(1, 2, 0).to('cpu').detach(), cmap=colormap, vmin=0, vmax=1)
+    fig.show()
+    fig.savefig("earth_pred.png")
