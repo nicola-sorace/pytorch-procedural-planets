@@ -3,5 +3,6 @@
 data
 *.pt
 *.png
+!/readme_img/*.png
 *.pdf
 *.svg
